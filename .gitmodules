@@ -1,3 +1,6 @@
 [submodule "thomasa88lib"]
 	path = thomasa88lib
 	url = https://github.com/thomasa88/fusion360-thomasa88lib.git
+[submodule "AddinLib"]
+	path = AddinLib
+	url = https://github.com/Zxynine/AddinLib

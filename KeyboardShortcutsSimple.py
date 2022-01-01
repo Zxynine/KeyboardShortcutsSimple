@@ -19,335 +19,280 @@
 # You should have received a copy of the GNU General Public License
 # along with KeyboardShortcutsSimple.  If not, see <https://www.gnu.org/licenses/>.
 
-import adsk.core, adsk.fusion, adsk.cam, traceback
+import adsk.core, adsk.fusion, adsk.cam
 
-from collections import defaultdict
-import json
-import operator
 import os
-import sys
 from tkinter import Tk
-import xml.etree.ElementTree as ET
-
-NAME = 'Keyboard Shortcuts Simple'
-
-FILE_DIR = os.path.dirname(os.path.realpath(__file__))
-
+from collections import defaultdict
 
 # Import relative path to avoid namespace pollution
-from .thomasa88lib import utils
-from .thomasa88lib import events
-from .thomasa88lib import error
+from .AddinLib import utils, events, manifest, error, settings, geometry, AppObjects
+utils.ReImport_List(AppObjects, events, manifest, error, settings, geometry, utils)
 
-from .version import VERSION
-if os.name == 'nt':
-    from . import windows as platform
-else:
-    from . import mac as platform
 
-# Force modules to be fresh during development
-import importlib
-importlib.reload(thomasa88lib.utils)
-importlib.reload(thomasa88lib.events)
-importlib.reload(thomasa88lib.error)
-importlib.reload(platform)
+NAME = 'Keyboard Shortcuts Simple'
+VERSION = '0.1.3'
+FILE_DIR = os.path.dirname(os.path.realpath(__file__))
+
+# if os.name == 'nt': from . import windows as platform
+# else: from . import mac as platform
+from .platformDirs import getUserHotkeys,USER_OPTIONS_DIR
+from . import KeyCodeUtil
 
 
 LIST_CMD_ID = 'thomasa88_keyboardShortcutsSimpleList'
 UNKNOWN_WORKSPACE = 'UNKNOWN'
 
-app_ = None
-ui_ = None
-error_catcher_ = thomasa88lib.error.ErrorCatcher(msgbox_in_debug=False)
-events_manager_ = thomasa88lib.events.EventsManager(error_catcher_)
-list_cmd_def_ = None
-cmd_def_workspaces_map_ = None
-used_workspaces_ids_ = None
-sorted_workspaces_ = None
+app_:adsk.core.Application = None
+ui_:adsk.core.UserInterface = None
+error_catcher_ = error.ErrorCatcher(msgbox_in_debug=False)
+events_manager_ = events.EventsManager(error_catcher_)
+list_cmd_def_:adsk.core.CommandDefinition = None
+cmd_def_workspaces_map_:'defaultdict[str, set[str]]' = defaultdict(set)
+used_workspaces_ids_:set = set()
 ws_filter_map_ = None
-ns_hotkeys_ = None
+ns_hotkeys_:'defaultdict[str, list[HotKey]]' = defaultdict(list)
 
-class Hotkey:
-    pass
 
-def list_command_created_handler(args):
-    eventArgs = adsk.core.CommandCreatedEventArgs.cast(args)
+workspace_input:adsk.core.DropDownCommandInput = None
+only_user_input:adsk.core.BoolValueCommandInput = None
+shortcut_sort_input:adsk.core.BoolValueCommandInput = None
+list_Box:adsk.core.TextBoxCommandInput = None
+copy_input:adsk.core.BoolValueCommandInput = None
 
-    get_data()
+longestName = 0
 
-    # The nifty thing with cast is that code completion then knows the object type
-    cmd = adsk.core.Command.cast(args.command)
-    cmd.isRepeatable = False
-    cmd.isExecutedWhenPreEmpted = False
-    cmd.isOKButtonVisible = False
-    cmd.setDialogMinimumSize(350, 200)
-    cmd.setDialogInitialSize(400, 500)
+# class HotKey:
+# 	def __init__(self, hotkeyDict, fusionSeq):
+# 		global ns_hotkeys_,longestName
 
-    events_manager_.add_handler(cmd.inputChanged,
-                                adsk.core.InputChangedEventHandler,
-                                input_changed_handler)
-    events_manager_.add_handler(cmd.destroy,
-                                adsk.core.CommandEventHandler,
-                                destroy_handler)
+# 		keySeq,baseKey = fusion_key_to_keyboard_key(fusionSeq)
 
-    inputs = cmd.commandInputs
+# 		self.command_id = hotkeyDict['command_id']
+# 		self.command_argument = hotkeyDict['command_argument']
+# 		self.is_default = hotkeyDict['isDefault']
+# 		self.fusion_key_sequence = fusionSeq
+# 		self.keyboard_key_sequence = keySeq
+# 		self.keyboard_base_key = baseKey
+		
+# 		command = ui_.commandDefinitions.itemById(self.command_id)
+# 		self.command_name = (command.name if command else self.command_id)
+# 		self.command_name += (f'->{self.command_argument}' * bool(self.command_argument))
+# 		self.command_name += ('*'*(not self.is_default))
+# 		if len(self.command_name) > longestName: longestName= len(self.command_name)
 
-    workspace_input = inputs.addDropDownCommandInput('workspace',
-                                                     'Workspace',
-                                                     adsk.core.DropDownStyles.LabeledIconDropDownStyle)
-    global ws_filter_map_
-    ws_filter_map_ = []
-    workspace_input.listItems.add('All', True, '', -1)
-    ws_filter_map_.append(None)
-    #workspace_input.listItems.addSeparator(-1)
-    workspace_input.listItems.add('----------------------------------', False, '', -1)
-    ws_filter_map_.append('SEPARATOR')
-    workspace_input.listItems.add('General', False, '', -1)
-    ws_filter_map_.append(UNKNOWN_WORKSPACE)
-    for workspace in sorted_workspaces_:
-        workspace_input.listItems.add(workspace.name, False, '', -1)
-        ws_filter_map_.append(workspace.id)
-    
-    only_user_input = inputs.addBoolValueInput('only_user', 'Only user-defined          ', True, '', True)
-    shortcut_sort_input = inputs.addBoolValueInput('shortcut_sort', 'Sort by shortcut keys', True, '', False)
 
-    inputs.addTextBoxCommandInput('list', '', get_hotkeys_str(only_user=only_user_input.value), 30, False)
-    inputs.addTextBoxCommandInput('list_info', '', '* = User-defined', 1, True)
+# 		self.workspaces = cmd_def_workspaces_map_.get(self.command_id, [UNKNOWN_WORKSPACE])
+# 		[ns_hotkeys_[workspace].append(self) for workspace in self.workspaces]
 
-    copy_input = inputs.addBoolValueInput('copy', 'Copy', False, 
-                                          thomasa88lib.utils.get_fusion_deploy_folder() + '/Electron/UI/Resources/Icons/Copy')
+# 		self.hid = (self.command_name, self.command_argument)
 
-def get_data():
-    # Build on every invocation, in case keys have changed
-    # (Does not really matter for a Script)
-    build_cmd_def_workspaces_map()
-    global sorted_workspaces_
-    sorted_workspaces_ = sorted([ui_.workspaces.itemById(w_id) for w_id in used_workspaces_ids_],
-                                 key=lambda w: w.name)
+# 	def getFormatted(self, HTML=False): 
+# 		formattedString = f'{self.command_name:<{longestName}} :{self.keyboard_key_sequence}'
+# 		return formattedString if not HTML else formattedString.replace('>', '&gt;')
+# 	def shouldDisplay(self): return not (only_user_input.value and self.is_default)
+# 	def sortKey(self):return (self.keyboard_base_key, self.keyboard_key_sequence) if shortcut_sort_input.value else self.command_name
+# 	@staticmethod
+# 	def filterSort(hotkeys:'list[HotKey]'):
+# 		filtered = {hotkey.hid:hotkey for hotkey in hotkeys if hotkey.shouldDisplay()}
+# 		return sorted(list(filtered.values()), key=HotKey.sortKey)
 
-    global ns_hotkeys_
-    options_file = platform.find_options_file(app_)
-    hotkeys = parse_hotkeys(options_file)
-    hotkeys = map_command_names(hotkeys)
-    ns_hotkeys_ = namespace_group_hotkeys(hotkeys)
 
-def input_changed_handler(args):
-    eventArgs = adsk.core.InputChangedEventArgs.cast(args)
 
-    inputs = eventArgs.inputs
-    if eventArgs.input.id == 'list':
-        return
-    
-    list_input = inputs.itemById('list')
-    only_user_input = inputs.itemById('only_user')
-    shortcut_sort_input = inputs.itemById('shortcut_sort')    
-    workspace_input = inputs.itemById('workspace')
+class HotKey:
+	def FromJsonObj(hotkeyObj):
+		[HotKey(command, hotkeyObj['hotkey_sequence']) for command in hotkeyObj['commands']]
 
-    workspace_filter = ws_filter_map_[workspace_input.selectedItem.index]
+	def __init__(self, hotkeyDict,fusionSeq):
+		global ns_hotkeys_,longestName
 
-    if eventArgs.input.id == 'copy':
-        copy_input = eventArgs.input
-        copy_input.value = False
-        copy_to_clipboard(get_hotkeys_str(only_user_input.value, workspace_filter,
-                                          sort_by_key=shortcut_sort_input.value,
-                                          html=False))
-    else:
-        # Update list
-        list_input.formattedText = get_hotkeys_str(only_user_input.value, workspace_filter,
-                                                   sort_by_key=shortcut_sort_input.value)
+		keySeq,baseKey = fusion_key_to_keyboard_key(fusionSeq)
 
-def destroy_handler(args):
-    # Force the termination of the command.
-    adsk.terminate()
-    events_manager_.clean_up()
+		self.command_id = hotkeyDict['command_id']
+		self.command_argument = hotkeyDict['command_argument']
+		self.is_default = hotkeyDict['isDefault']
+		self.fusion_key_sequence = fusionSeq
+		self.keyboard_key_sequence = keySeq
+		self.keyboard_base_key = baseKey
+		
+		command = ui_.commandDefinitions.itemById(self.command_id)
+		self.command_name = (command.name if command else self.command_id)
+		self.command_name += (f'->{self.command_argument}' * bool(self.command_argument))
+		self.command_name += ('*'*(not self.is_default))
+		if len(self.command_name) > longestName: longestName= len(self.command_name)
 
-def get_hotkeys_str(only_user=False, workspace_filter=None, sort_by_key=False, html=True):
-    # HTML table is hard to copy-paste. Use fixed-width font instead.
-    # Supported HTML in QT: https://doc.qt.io/archives/qt-4.8/richtext-html-subset.html
 
-    def header(text, text_underline='-'):
-        if html:
-            return f'<b>{text}</b><br>'
-        else:
-            return f'{text}\n{text_underline * len(text)}\n'
-        
-    def newline():
-        return '<br>' if html else '\n'
+		self.workspaces = cmd_def_workspaces_map_.get(self.command_id, [UNKNOWN_WORKSPACE])
+		[ns_hotkeys_[workspace].append(self) for workspace in self.workspaces]
 
-    def sort_key(hotkey):
-        if sort_by_key:
-            return (hotkey.keyboard_base_key, hotkey.keyboard_key_sequence)
-        else:
-            return hotkey.command_name
+		self.hid = (self.command_name, self.command_argument)
 
-    string = ''
-    if html:
-        string += '<pre>'
-    else:
-        string += header('Fusion 360 Keyboard Shortcuts', '=') + '\n'
-    
-    for workspace_id, hotkeys in ns_hotkeys_.items():
-        if workspace_filter and workspace_id != workspace_filter:
-            continue
-        # Make sure to filter before any de-dup operation
-        if only_user:
-            hotkeys = [hotkey for hotkey in hotkeys if not hotkey.is_default]
-        if not hotkeys:
-            continue
-        hotkeys = deduplicate_hotkeys(hotkeys)
-        if workspace_id != UNKNOWN_WORKSPACE:
-            workspace_name = ui_.workspaces.itemById(workspace_id).name
-        else:
-            workspace_name = 'General'
+	def getFormatted(self, HTML=False): 
+		formattedString = f'{self.command_name:<{longestName}} :{self.keyboard_key_sequence}'
+		return formattedString if not HTML else formattedString.replace('>', '&gt;')
+	def shouldDisplay(self): return not (only_user_input.value and self.is_default)
+	def sortKey(self):return (self.keyboard_base_key, self.keyboard_key_sequence) if shortcut_sort_input.value else self.command_name
+	@staticmethod
+	def filterSort(hotkeys:'list[HotKey]'):
+		filtered = {hotkey.hid:hotkey for hotkey in hotkeys if hotkey.shouldDisplay()}
+		return sorted(list(filtered.values()), key=HotKey.sortKey)
 
-        if html:
-            string += f'<b>{workspace_name}</b><br>'
-        else:
-            string += f'{workspace_name}\n{"=" * len(workspace_name)}\n'
 
-        for hotkey in sorted(hotkeys, key=sort_key):
-            name = hotkey.command_name
-            if not hotkey.is_default:
-                name += '*'
-            string += f'{name:30} {hotkey.keyboard_key_sequence}'
-            string += newline()
-        string += newline()
-    
-    if html:
-        string += '</pre>'
-    else:
-        string += '* = User-defined'
-    return string
 
-def map_command_names(hotkeys):
-    for hotkey in hotkeys:
-        command = ui_.commandDefinitions.itemById(hotkey.command_id)
-        if command:
-            command_name = command.name
-        else:
-            command_name = hotkey.command_id
-        if hotkey.command_argument:
-            command_name += '-&gt;' + hotkey.command_argument
-        hotkey.command_name = command_name
-    return hotkeys
 
-def namespace_group_hotkeys(hotkeys):
-    ns_hotkeys = defaultdict(list)
-    for hotkey in hotkeys:
-        workspaces = find_cmd_workspaces(hotkey.command_id)
-        for workspace in workspaces:
-            ns_hotkeys[workspace].append(hotkey)
-        if not workspaces:
-            ns_hotkeys[UNKNOWN_WORKSPACE].append(hotkey)
-    return ns_hotkeys
 
-def build_cmd_def_workspaces_map():
-    global cmd_def_workspaces_map_
-    global used_workspaces_ids_
-    cmd_def_workspaces_map_ = defaultdict(set)
-    used_workspaces_ids_ = set()
-    for workspace in ui_.workspaces:
-        try:
-            if workspace.productType == '':
-                continue
-        except Exception:
-            continue
-        for panel in workspace.toolbarPanels:
-            explore_controls(panel.controls, workspace)
 
-def explore_controls(controls, workspace):
-    global used_workspaces_ids_
-    for control in controls:
-        if control.objectType == adsk.core.CommandControl.classType():
-            try:
-                cmd_id = control.commandDefinition.id
-            except RuntimeError as e:
-                #print(f"Could not read commandDefintion for {control.id}", control)
-                continue
-            cmd_def_workspaces_map_[cmd_id].add(workspace.id)
-            used_workspaces_ids_.add(workspace.id)
-            #print("READ", cmd_id)
-        elif control.objectType == adsk.core.DropDownControl.classType():
-            explore_controls(control.controls, workspace)
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+def list_command_created_handler(args:adsk.core.CommandCreatedEventArgs):
+	explore_workspaces(ui_.workspaces)
+	sorted_workspaces_ = sorted([ui_.workspaces.itemById(w_id) for w_id in used_workspaces_ids_],  key=lambda w: w.name)
 
-def find_cmd_workspaces(cmd_id):
-    return cmd_def_workspaces_map_.get(cmd_id, [ UNKNOWN_WORKSPACE ])
+	[HotKey.FromJsonObj(h) for h in getUserHotkeys(USER_OPTIONS_DIR) if 'hotkey_sequence' in h]
 
-def deduplicate_hotkeys(hotkeys):
-    ids = set()
-    filtered = []
-    for hotkey in hotkeys:
-        # Using command_name instead of command_id, as the names duplicate
-        hid = (hotkey.command_name, hotkey.command_argument)
-        if hid in ids:
-            #print("DUP: ", hotkey.command_id, hotkey.command_argument, hotkey.fusion_key_sequence)
-            continue
-        ids.add(hid)
-        filtered.append(hotkey)
-    return filtered
+	cmd=args.command
+	cmd.isRepeatable = False
+	cmd.isExecutedWhenPreEmpted = False
+	cmd.isOKButtonVisible = False
+	cmd.setDialogMinimumSize(350, 200)
+	cmd.setDialogInitialSize(400, 500)
 
-def parse_hotkeys(options_file):
-    hotkeys = []
-    xml = ET.parse(options_file)
-    root = xml.getroot()
-    json_element = root.find('./HotKeyGroup/HotKeyJSONString')
-    value = json.loads(json_element.attrib['Value'])
-    for h in value['hotkeys']:
-        if 'hotkey_sequence' not in h:
-            continue
-        fusion_key_sequence = h['hotkey_sequence']
+	events_manager_.add_handler(cmd.inputChanged, input_changed_handler)
+	events_manager_.add_handler(cmd.destroy, destroy_handler)
 
-        # Move data extraction to separate function?
-        # E.g. ! is used for shift+1, so we need to pull out the virtual keycode,
-        # to get the actual key that the user needs to press. (E.g. '=' is placed
-        # on different keys on different keyboards and some use shift.)
-        keyboard_key_sequence, keyboard_base_key = platform.fusion_key_to_keyboard_key(fusion_key_sequence)
+	inputs = cmd.commandInputs
+	global workspace_input, only_user_input, shortcut_sort_input,list_Box,copy_input,ws_filter_map_
+	workspace_input = inputs.addDropDownCommandInput('workspace', 'Workspace', adsk.core.DropDownStyles.LabeledIconDropDownStyle)
 
-        for hotkey_command in h['commands']:
-            hotkey = Hotkey()
-            hotkey.command_id = hotkey_command['command_id']
-            hotkey.command_argument = hotkey_command['command_argument']
-            hotkey.is_default = hotkey_command['isDefault']
-            hotkey.fusion_key_sequence = fusion_key_sequence
-            hotkey.keyboard_key_sequence = keyboard_key_sequence
-            hotkey.keyboard_base_key = keyboard_base_key
-            hotkeys.append(hotkey)
-    return hotkeys
+	ws_filter_map_ = []
+	workspace_input.listItems.add('All', True, '', -1)
+	ws_filter_map_.append(None)
+	workspace_input.listItems.add('----------------------------------', False, '', -1)
+	ws_filter_map_.append('SEPARATOR')
+	workspace_input.listItems.add('General', False, '', -1)
+	ws_filter_map_.append(UNKNOWN_WORKSPACE)
+	for workspace in sorted_workspaces_:
+		workspace_input.listItems.add(workspace.name, False, '', -1)
+		ws_filter_map_.append(workspace.id)
+	
+	only_user_input = inputs.addBoolValueInput('only_user', 'Only user-defined          ', True, '', True)
+	shortcut_sort_input = inputs.addBoolValueInput('shortcut_sort', 'Sort by shortcut keys', True, '', False)
+
+	list_Box = inputs.addTextBoxCommandInput('list', '', get_hotkeys_str(), 30, False)
+	list_Box.isReadOnly = True
+	inputs.addTextBoxCommandInput('list_info', '', '* = User-defined', 1, True)
+
+	copy_input = inputs.addBoolValueInput('copy', 'Copy', False, f'{utils.get_fusion_deploy_folder()}/Electron/UI/Resources/Icons/Copy')
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+def input_changed_handler(args:adsk.core.InputChangedEventArgs):
+	if args.input.id == 'list': return
+	workspace_filter = ws_filter_map_[workspace_input.selectedItem.index]
+	isCopy = args.input.id == 'copy'
+	if isCopy: copy_to_clipboard(get_hotkeys_str(workspace_filter, html=False))
+	else: list_Box.formattedText = get_hotkeys_str(workspace_filter, html=True) # Update list
+
+
+def get_hotkeys_str(workspace_filter=None, html=True):
+	# HTML table is hard to copy-paste. Use fixed-width font instead.
+	# Supported HTML in QT: https://doc.qt.io/archives/qt-4.8/richtext-html-subset.html
+	def htmlSwitch(trueVal, falseVal):return trueVal if html else falseVal
+	newline = htmlSwitch('<br>','\n')
+	def header(text, text_underline='-'): return htmlSwitch(f'<b>{text}</b>',  f'{text}\n{text_underline * len(text)}') + newline
+
+	string = htmlSwitch('<pre>', f"{header('Fusion 360 Keyboard Shortcuts', '=')}\n")
+	for workspace_id, hotkeys in ns_hotkeys_.items():
+		# Make sure to filter before any de-dup operation
+		if workspace_filter and workspace_id != workspace_filter: continue
+
+		filteredHotkeys = HotKey.filterSort(hotkeys)
+		if not filteredHotkeys: continue
+
+		workspace_name = 'General' if workspace_id == UNKNOWN_WORKSPACE else ui_.workspaces.itemById(workspace_id).name
+		string += header(workspace_name,"=")
+		
+		for hotkey in filteredHotkeys: string += hotkey.getFormatted(html) + newline
+		string += newline
+	return string + htmlSwitch('<pre>', '* = User-defined')
+
+
+def explore_workspaces(workspaces:'list[adsk.core.Workspace]'):
+	global used_workspaces_ids_
+	for workspace in workspaces:
+		if CheckProduct(workspace):
+			def exploreCtrls(controls:'list[adsk.core.CommandControl]'):
+				for control in controls:
+					if isinstance(control, adsk.core.DropDownControl):
+						exploreCtrls(control.controls)
+					elif isinstance(control, adsk.core.CommandControl):
+						try: cmd_id = control.commandDefinition.id
+						except RuntimeError as e: continue
+						cmd_def_workspaces_map_[cmd_id].add(workspace.id)
+						used_workspaces_ids_.add(workspace.id)
+			panels:'list[adsk.core.ToolbarPanel]'= workspace.toolbarPanels
+			for panel in panels: exploreCtrls(panel.controls)
+
+
+
+
+
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+def run(context):
+	global app_, ui_
+	global list_cmd_def_
+	with error_catcher_:
+		app_, ui_ = AppObjects.GetAppUI()
+		if ui_.activeCommand == LIST_CMD_ID: ui_.terminateActiveCommand()
+		utils.getDelete(ui_.commandDefinitions, LIST_CMD_ID)
+		list_cmd_def_ = ui_.commandDefinitions.addButtonDefinition(LIST_CMD_ID, f'{NAME} {VERSION}', '',)
+		events_manager_.add_handler(list_cmd_def_.commandCreated, list_command_created_handler)
+		list_cmd_def_.execute()
+		adsk.autoTerminate(False)	# Keep the script running.
+
+def destroy_handler(args):	# Force the termination of the command.
+	adsk.terminate()
+	events_manager_.clean_up()
+
+
+
+
+
+# Move data extraction to separate function?
+# E.g. ! is used for shift+1, so we need to pull out the virtual keycode,
+# to get the actual key that the user needs to press. (E.g. '=' is placed
+# on different keys on different keyboards and some use shift.)
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+def fusion_key_to_keyboard_key(key_sequence:str):
+	keys = key_sequence.split('+')
+	# Application.cast(Application.get()).userInterface.messageBox(str(keys))
+	try: vk = KeyCodeUtil.nameToKeyMap[keys[-1].lower()]
+	except: 
+		try: vk = KeyCodeUtil.valueToKeyMap[ord(keys[-1])]
+		except:	
+			try: vk = KeyCodeUtil.alternateMappings[keys[-1]]
+			except:
+				ui_.messageBox(str(ord(keys[-1])))
+				return '+'.join(keys), keys[-1]
+
+	keys[-1] = vk.name
+	return '+'.join(keys), vk.name
+
 
 def copy_to_clipboard(string):
-    # From https://stackoverflow.com/a/25476462/106019
-    r = Tk()
-    r.withdraw()
-    r.clipboard_clear()
-    r.clipboard_append(string)
-    r.update() # now it stays on the clipboard after the window is closed
-    r.destroy()
+	copy_input.value = False
+	# From https://stackoverflow.com/a/25476462/106019
+	r = Tk()
+	r.withdraw()
+	r.clipboard_clear()
+	r.clipboard_append(string)
+	r.update() # now it stays on the clipboard after the window is closed
+	r.destroy()
 
-def delete_command_def():
-    cmd_def = ui_.commandDefinitions.itemById(LIST_CMD_ID)
-    if cmd_def:
-        cmd_def.deleteMe()
 
-def run(context):
-    global app_
-    global ui_
-    global list_cmd_def_
-    with error_catcher_:
-        app_ = adsk.core.Application.get()
-        ui_ = app_.userInterface
-        
-        if ui_.activeCommand == LIST_CMD_ID:
-            ui_.terminateActiveCommand()
-        delete_command_def()
-        list_cmd_def_ = ui_.commandDefinitions.addButtonDefinition(LIST_CMD_ID,
-                                                                   f'{NAME} {VERSION}',
-                                                                   '',)
 
-        events_manager_.add_handler(list_cmd_def_.commandCreated,
-                                    adsk.core.CommandCreatedEventHandler,
-                                    list_command_created_handler)
-
-        list_cmd_def_.execute()
-
-        # Keep the script running.
-        adsk.autoTerminate(False)
+def CheckProduct(obj:adsk.core.Workspace):
+	#Tying to get its panels can throw an error
+	try: return obj.toolbarPanels and (obj.productType != '')
+	except: return False
