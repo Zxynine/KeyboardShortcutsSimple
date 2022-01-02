@@ -37,17 +37,16 @@ VERSION = '0.1.3'
 FILE_DIR = os.path.dirname(os.path.realpath(__file__))
 LIST_CMD_ID = 'thomasa88_keyboardShortcutsSimpleList'
 
+errorCatcher = error.ErrorCatcher(msgbox_in_debug=False)
+eventManager = events.EventsManager(errorCatcher)
 UNKNOWN_WORKSPACE = 'UNKNOWN'
 
 app_:adsk.core.Application = None
 ui_:adsk.core.UserInterface = None
-errorCatcher = error.ErrorCatcher(msgbox_in_debug=False)
-eventManager = events.EventsManager(errorCatcher)
+ws_filter_map_:list = None
 list_cmd_def_:adsk.core.CommandDefinition = None
-cmd_def_workspaces_map_:'defaultdict[str, set[str]]' = defaultdict(set)
-used_workspaces_ids_:set = set()
-ws_filter_map_ = None
 ns_hotkeys_:'defaultdict[str, list[HotKey]]' = defaultdict(list)
+cmdToWorkspaces:'defaultdict[str, set[str]]' = defaultdict(set)
 
 searchFilterInput:adsk.core.StringValueCommandInput = None
 workspace_input:adsk.core.DropDownCommandInput = None
@@ -73,6 +72,7 @@ class HotKeyCommand:
 		self.name += (f'->{self.argument}' * bool(self.argument))
 		self.name += ('**'*(not self.isDefault))
 		if len(self.name) > longestName: longestName= len(self.name)
+	def inSearch(self, searchStr:str): return not searchStr or self.name.lower().startswith(searchStr.lower())
 
 
 
@@ -89,15 +89,12 @@ class HotKey:
 		self.FullSequence = KeyCodeUtil.GetSequenceRepr(fusionSeq)
 		self.keySequence, self.BaseKey = self.FullSequence
 
-		self.workspaces = cmd_def_workspaces_map_.get(self.command.id, [UNKNOWN_WORKSPACE])
+		self.workspaces = cmdToWorkspaces.get(self.command.id, [UNKNOWN_WORKSPACE])
 		[ns_hotkeys_[workspace].append(self) for workspace in self.workspaces]
-
-		self.hid = (self.command.name, self.command.argument)
 
 	def getFormatted(self, HTML=False): 
 		formattedString = f'{self.command.name:<{longestName}} :{self.keySequence}'
 		return formattedString if not HTML else formattedString.replace('>', '&gt;')
-
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 def list_command_created_handler(args:adsk.core.CommandCreatedEventArgs):
@@ -165,30 +162,24 @@ def get_hotkeys_str(html=True):
 	searchFilter = searchFilterInput.value
 	def sortKey(hotkey: HotKey):return hotkey.FullSequence if shortcut_sort_input.value else hotkey.command.name
 	def filterFunc(hotkey: HotKey): return not (only_user_input.value and hotkey.command.isDefault)
-	def htmlSwitch(trueVal, falseVal):return trueVal if html else falseVal
 
-	newline = htmlSwitch('<br>','\n')
-	def header(text, text_underline='-'): return htmlSwitch(f'<b><u>{text}</u></b>',  f'{text}\n{text_underline * len(text)}') + newline
+	newline = ('<br>' if html else '\n')
+	def header(text, underlineChar='-'): return (f'<b><u>{text}</u></b>' if html else f'{text}\n{underlineChar*len(text)}') + newline
+	start,end = (('<pre>','<pre>') if html else (f"{header('Fusion 360 Keyboard Shortcuts', '=')}\n", '** = User-defined'))
 
-	string = htmlSwitch('<pre>', f"{header('Fusion 360 Keyboard Shortcuts', '=')}\n")
+	string = start
 	for workspace_id, hotkeys in ns_hotkeys_.items():
 		if selectedWorkspace and workspace_id != selectedWorkspace: continue
 		
-
 		filteredHotkeys = sorted(filter(filterFunc, hotkeys), key=sortKey)
 		if not filteredHotkeys: continue
 
-		hotkeyStrings = []
-		for hotkey in filteredHotkeys: 
-			if searchFilter == '' or hotkey.command.name.startswith(searchFilter):
-				hotkeyStrings.append(hotkey.getFormatted(html))
+		hotkeyStrings = [hotkey.getFormatted(html) for hotkey in filteredHotkeys if hotkey.command.inSearch(searchFilter)]
 		if not hotkeyStrings: continue
 
 		workspace_name = 'General' if workspace_id == UNKNOWN_WORKSPACE else ui_.workspaces.itemById(workspace_id).name
-		string += header(workspace_name,"=")
-		string += newline.join(hotkeyStrings) + newline*2
-		
-	return string + htmlSwitch('<pre>', '** = User-defined')
+		string += header(workspace_name,"=") + newline.join(hotkeyStrings) + newline*2
+	return string + end
 
 
 
@@ -202,16 +193,14 @@ def exploreCtrls(workspaceID, controls:'list[adsk.core.CommandControl]'): # Need
 			exploreCtrls(workspaceID, control.controls)
 		elif isinstance(control, adsk.core.CommandControl):
 			with utils.Ignore(RuntimeError):
-				cmd_id = control.commandDefinition.id
-				cmd_def_workspaces_map_[cmd_id].add(workspaceID)
-				used_workspaces_ids_.add(workspaceID)
+				cmdToWorkspaces[control.commandDefinition.id].add(workspaceID)
 
 def exploreWorkspaces(workspaces:'list[adsk.core.Workspace]'):
 	for workspace in workspaces:
 		if CheckProduct(workspace):
 			for i in range(workspace.toolbarPanels.count):
 				exploreCtrls(workspace.id, workspace.toolbarPanels.item(i).controls)
-	return sorted([ui_.workspaces.itemById(w_id) for w_id in used_workspaces_ids_],  key=lambda w: w.name)
+	return sorted(filter(None, map(ui_.workspaces.itemById, cmdToWorkspaces.keys())),  key=lambda w:w.name)
 
 
 
