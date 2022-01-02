@@ -86,7 +86,7 @@ class HotKey:
 		self.command = HotKeyCommand(commandDict)
 
 		self.fusion_key_sequence = fusionSeq
-		self.FullSequence = fusion_key_to_keyboard_key(fusionSeq)
+		self.FullSequence = KeyCodeUtil.GetSequenceRepr(fusionSeq)
 		self.keySequence, self.BaseKey = self.FullSequence
 
 		self.workspaces = cmd_def_workspaces_map_.get(self.command.id, [UNKNOWN_WORKSPACE])
@@ -238,16 +238,6 @@ def destroy_handler(args):
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-def fusion_key_to_keyboard_key(key_sequence:str):
-	keys = key_sequence.split('+')
-	# Either ord OR the dict access will throw an error
-	vk = KeyCodeUtil.GetKeyCode(keys[-1])
-	# Make each word capital and replace the end key with the representation
-	keys = list(map(str.capitalize,keys[:-1]))+[vk.repr,]
-	return '+'.join(keys), vk.repr
-
-
-
 
 def CheckProduct(obj:adsk.core.Workspace):
 	#Tying to get its panels can throw an error
