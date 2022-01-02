@@ -21,6 +21,8 @@
 
 import adsk.core, adsk.fusion, adsk.cam
 from .AddinLib.utils import Scripts
+from .AddinLib import KeyCodeUtil
+from .AddinLib import platformDirs as platform
 
 import os
 from collections import defaultdict
@@ -33,12 +35,8 @@ utils.ReImport_List(AppObjects, events, manifest, error, settings, geometry, uti
 NAME = 'Keyboard Shortcuts Simple'
 VERSION = '0.1.3'
 FILE_DIR = os.path.dirname(os.path.realpath(__file__))
-
-from .platformDirs import getUserHotkeys,USER_OPTIONS_DIR
-from . import KeyCodeUtil
-
-
 LIST_CMD_ID = 'thomasa88_keyboardShortcutsSimpleList'
+
 UNKNOWN_WORKSPACE = 'UNKNOWN'
 
 app_:adsk.core.Application = None
@@ -104,7 +102,7 @@ class HotKey:
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 def list_command_created_handler(args:adsk.core.CommandCreatedEventArgs):
 	sorted_workspaces_ = exploreWorkspaces(ui_.workspaces)
-	HotKey.ParseJson(filter(lambda h:'commands' in h, getUserHotkeys(USER_OPTIONS_DIR)))
+	HotKey.ParseJson(filter(lambda h:'commands' in h, platform.getUserHotkeys()))
 
 	cmd=args.command
 	cmd.isRepeatable = False

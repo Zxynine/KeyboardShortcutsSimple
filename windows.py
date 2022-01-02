@@ -25,7 +25,7 @@ import ctypes
 import pathlib
 
 from adsk.core import Application
-from . import KeyCodeUtil
+from .AddinLib import KeyCodeUtil
 
 # Virtual Keycodes are available here:
 # https://docs.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes
