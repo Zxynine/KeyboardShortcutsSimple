@@ -21,8 +21,8 @@
 
 import adsk.core, adsk.fusion, adsk.cam
 from .AddinLib.utils import Scripts
-from .AddinLib import KeyCodeUtil
-from .AddinLib import platformDirs as platform
+from .AddinLib.CommandInputs import CommandInputs
+from .AddinLib import KeyCodeUtil, platformDirs as platform
 
 import os
 from collections import defaultdict
@@ -72,9 +72,6 @@ class HotKeyCommand:
 		self.name += (f'->{self.argument}' * bool(self.argument))
 		self.name += ('**'*(not self.isDefault))
 		if len(self.name) > longestName: longestName= len(self.name)
-	def inSearch(self, searchStr:str): return not searchStr or self.name.lower().startswith(searchStr.lower())
-
-
 
 class HotKey:
 	def ParseJson(HotKeyJSON:'list[dict]'):
@@ -93,8 +90,14 @@ class HotKey:
 		[ns_hotkeys_[workspace].append(self) for workspace in self.workspaces]
 
 	def getFormatted(self, HTML=False): 
-		formattedString = f'{self.command.name:<{longestName}} :{self.keySequence}'
-		return formattedString if not HTML else formattedString.replace('>', '&gt;')
+		name,seqence = f'{self.command.name:<{longestName}}', self.keySequence
+		if HTML: name,seqence = utils.toHtml(name), f'<b>{utils.toHtml(seqence)}</b>' 
+		return f'{name} : {seqence}'
+
+	def inSearch(self, searchStr:str): 
+		if not searchStr: return True
+		if shortcut_sort_input.value: return searchStr.lower() in self.keySequence.lower()
+		else: return self.command.name.lower().startswith(searchStr.lower())
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 def list_command_created_handler(args:adsk.core.CommandCreatedEventArgs):
@@ -118,31 +121,27 @@ def list_command_created_handler(args:adsk.core.CommandCreatedEventArgs):
 		**{'----------------------------------':'SEPARATOR'}, #Cannot use string as argument :/
 		**{workspace.name:workspace.id for workspace in sorted_workspaces_})
 
-	inputs = cmd.commandInputs
+	inputs = CommandInputs(cmd.commandInputs)
 	global workspace_input, only_user_input, shortcut_sort_input,list_Box,copy_input,ws_filter_map_,searchFilterInput
 	global ShortcutsGroup, InfoGroup
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-	workspace_input = inputs.addDropDownCommandInput('workspace', 'Workspace', adsk.core.DropDownStyles.LabeledIconDropDownStyle)
-	ws_filter_map_ = [name for id,name in ListItems.items() if workspace_input.listItems.add(id, False, '', -1)]
-	workspace_input.listItems.item(0).isSelected = True #Selects the first list option
+	workspace_input = inputs.addRadioButtonDropDownInput('workspace', 'Workspace', *ListItems.keys())
+	ws_filter_map_ = list(ListItems.values())
 
-	only_user_input = inputs.addBoolValueInput('only_user', 'Only user-defined          ', True, '', True)
-	shortcut_sort_input = inputs.addBoolValueInput('shortcut_sort', 'Sort by shortcut keys', True, '', False)
+	only_user_input = inputs.addCheckboxInput('only_user', 'Only user-defined', True)
+	shortcut_sort_input = inputs.addCheckboxInput('shortcut_sort', 'Sort by shortcut keys', False)
 	
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-	ShortcutsGroup = inputs.addGroupCommandInput('ShortcutsGroup', 'Keyboard Shortcuts')
-	ShortcutsGroup.isEnabledCheckBoxDisplayed = False
+	ShortcutsGroup = inputs.addVisualDividerInput('ShortcutsGroup', 'Keyboard Shortcuts',True)
 
 	searchFilterInput = inputs.addStringValueInput('filter_input', 'Search:', '')
-	list_Box = inputs.addTextBoxCommandInput('list', '', get_hotkeys_str(), 30, False)
-	list_Box.isReadOnly = True
 
-	InfoGroup = inputs.addGroupCommandInput('InfoGroup', '** = User-defined')
-	InfoGroup.isEnabledCheckBoxDisplayed = False
-	InfoGroup.isExpanded = False
+	list_Box = inputs.addTextBoxCommandInput('list', '', get_hotkeys_str(), 30, True)
+
+	InfoGroup = inputs.addVisualDividerInput('InfoGroup', '** = User-defined')
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	copy_input = inputs.addButtonInput('copy', 'Copy', utils.GetCommandIcon('Electron::Copy'))
 
-	copy_input = inputs.addBoolValueInput('copy', 'Copy', False, f'{utils.get_fusion_deploy_folder()}/Electron/UI/Resources/Icons/Copy')
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -150,7 +149,7 @@ def input_changed_handler(args:adsk.core.InputChangedEventArgs):
 	if args.input.id == 'list': return
 	if args.input.id == ShortcutsGroup.id: ShortcutsGroup.isExpanded = True
 	if args.input.id == InfoGroup.id: InfoGroup.isExpanded = False
-	if args.input.id == 'copy': utils.copy_to_clipboard(get_hotkeys_str(html=False))
+	if args.input.id == 'copy': utils.copy_to_clipboard(get_hotkeys_str(html=False), True)
 	else: list_Box.formattedText = get_hotkeys_str(html=True) # Update list
 
 
@@ -174,7 +173,7 @@ def get_hotkeys_str(html=True):
 		filteredHotkeys = sorted(filter(filterFunc, hotkeys), key=sortKey)
 		if not filteredHotkeys: continue
 
-		hotkeyStrings = [hotkey.getFormatted(html) for hotkey in filteredHotkeys if hotkey.command.inSearch(searchFilter)]
+		hotkeyStrings = [hotkey.getFormatted(html) for hotkey in filteredHotkeys if hotkey.inSearch(searchFilter)]
 		if not hotkeyStrings: continue
 
 		workspace_name = 'General' if workspace_id == UNKNOWN_WORKSPACE else ui_.workspaces.itemById(workspace_id).name
@@ -187,21 +186,24 @@ def get_hotkeys_str(html=True):
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
-def exploreCtrls(workspaceID, controls:'list[adsk.core.CommandControl]'): # Needed so it can be recursive
-	for control in controls:
-		if isinstance(control, adsk.core.DropDownControl):
-			exploreCtrls(workspaceID, control.controls)
-		elif isinstance(control, adsk.core.CommandControl):
-			with utils.Ignore(RuntimeError):
-				cmdToWorkspaces[control.commandDefinition.id].add(workspaceID)
+
 
 def exploreWorkspaces(workspaces:'list[adsk.core.Workspace]'):
+	uniqueWorkspaces = set()
 	for workspace in workspaces:
-		if CheckProduct(workspace):
+		if utils.CheckWorkspace(workspace):
 			for i in range(workspace.toolbarPanels.count):
+				def exploreCtrls(workspaceID, controls:'list[adsk.core.CommandControl]'): # Needed so it can be recursive
+					for control in controls:
+						if isinstance(control, adsk.core.DropDownControl):
+							exploreCtrls(workspaceID, control.controls)
+						elif isinstance(control, adsk.core.CommandControl):
+							with utils.Ignore(RuntimeError): #Getting the command def can throw errors
+								cmdToWorkspaces[control.commandDefinition.id].add(workspaceID)
+								
 				exploreCtrls(workspace.id, workspace.toolbarPanels.item(i).controls)
-	return sorted(filter(None, map(ui_.workspaces.itemById, cmdToWorkspaces.keys())),  key=lambda w:w.name)
-
+			uniqueWorkspaces.add(workspace.id)
+	return sorted(filter(None, map(ui_.workspaces.itemById, uniqueWorkspaces)),  key=lambda w:w.name)
 
 
 
@@ -227,8 +229,3 @@ def destroy_handler(args):
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-def CheckProduct(obj:adsk.core.Workspace):
-	#Tying to get its panels can throw an error
-	try: return obj.toolbarPanels and (obj.productType != '')
-	except: return False
